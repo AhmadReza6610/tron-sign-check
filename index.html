@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tron SignMessageV2 Check</title>
+<style>
+  :root { --bg: #ffffff; --fg: #1a1a1a; --muted: #666; --card: #f4f5f7; --ok: #1b7f3b; --bad: #b42318; --warn: #9a6700; --accent: #2b59c3; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111317; --fg: #e8e8e8; --muted: #9aa0a6; --card: #1c1f25; --ok: #4cc27a; --bad: #ff6b5e; --warn: #e3b341; --accent: #7aa2ff; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg); font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 640px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.lead { color: var(--muted); margin: 0 0 16px; }
+  label { display: block; font-weight: 600; margin: 12px 0 4px; }
+  input { width: 100%; padding: 10px; font: inherit; border: 1px solid var(--muted); border-radius: 8px; background: var(--card); color: var(--fg); }
+  button { margin: 12px 8px 0 0; padding: 10px 16px; font: inherit; font-weight: 600; border: 0; border-radius: 8px; background: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; }
+  .card { background: var(--card); border-radius: 10px; padding: 12px; margin-top: 16px; }
+  .row { margin: 6px 0; word-break: break-all; }
+  .k { color: var(--muted); font-size: 13px; display: block; }
+  .v { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+  .verdict { font-weight: 700; font-size: 16px; margin-bottom: 8px; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+  pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; background: var(--bg); padding: 8px; border-radius: 6px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Tron signMessageV2 check</h1>
+  <p class="lead">Open this page in your wallet's DApp browser with a TRON wallet selected. It asks the wallet to sign a short text with <code>signMessageV2</code>, then checks the signature locally against TronWeb's V2 format. Nothing is sent anywhere, and no transaction is created.</p>
+
+  <div class="card">
+    <div class="row"><span class="k">Wallet provider</span><span class="v" id="provider">detecting…</span></div>
+    <div class="row"><span class="k">Your TRON address (from the wallet)</span><span class="v" id="addr">–</span></div>
+  </div>
+
+  <label for="msg">Message to sign (plain text)</label>
+  <input id="msg" value="hello world" autocomplete="off">
+
+  <button id="connect">1. Connect</button>
+  <button id="sign" disabled>2. Sign with signMessageV2</button>
+
+  <div class="card" id="out" hidden>
+    <div class="verdict" id="verdict"></div>
+    <div class="row"><span class="k">Signature returned by the wallet</span><span class="v" id="sig"></span></div>
+    <div class="row"><span class="k">Recovered with TronWeb V2 format: keccak("\x19TRON Signed Message:\n" + length + message)</span><span class="v" id="recLen"></span></div>
+    <div class="row"><span class="k">Recovered with no-length format: keccak("\x19TRON Signed Message:\n" + message)</span><span class="v" id="recNoLen"></span></div>
+    <div class="row"><span class="k">Wallet's own tronWeb.trx.verifyMessageV2</span><span class="v" id="recWallet"></span></div>
+    <button id="copy">Copy result</button>
+    <pre id="report"></pre>
+  </div>
+</main>
+
+<script type="module">
+import { secp256k1 } from 'https://cdn.jsdelivr.net/npm/@noble/curves@1.4.2/secp256k1/+esm'
+import { keccak_256 } from 'https://cdn.jsdelivr.net/npm/@noble/hashes@1.4.0/sha3/+esm'
+import { sha256 } from 'https://cdn.jsdelivr.net/npm/@noble/hashes@1.4.0/sha256/+esm'
+
+const $ = id => document.getElementById(id)
+const enc = s => new TextEncoder().encode(s)
+const cat = (...parts) => {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0))
+  let i = 0
+  for (const p of parts) { out.set(p, i); i += p.length }
+  return out
+}
+const fromHex = h => Uint8Array.from(h.replace(/^0x/, '').match(/../g).map(b => parseInt(b, 16)))
+
+const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+function base58(bytes) {
+  let n = 0n
+  for (const b of bytes) n = n * 256n + BigInt(b)
+  let s = ''
+  while (n > 0n) { s = B58[Number(n % 58n)] + s; n /= 58n }
+  for (const b of bytes) { if (b !== 0) break; s = '1' + s }
+  return s
+}
+function tronAddress(pubPoint) {
+  const raw = pubPoint.toRawBytes(false).slice(1)
+  const body = cat(new Uint8Array([0x41]), keccak_256(raw).slice(-20))
+  return base58(cat(body, sha256(sha256(body)).slice(0, 4)))
+}
+function recover(sigHex, digest) {
+  const b = fromHex(sigHex)
+  if (b.length !== 65) throw new Error(`signature is ${b.length} bytes, expected 65`)
+  let v = b[64]
+  if (v >= 27) v -= 27
+  const sig = secp256k1.Signature.fromCompact(b.slice(0, 64)).addRecoveryBit(v)
+  return tronAddress(sig.recoverPublicKey(digest))
+}
+
+const PREFIX = '\x19TRON Signed Message:\n'
+let wallet = null
+
+function describeProvider() {
+  const parts = []
+  if (window.tronLink) parts.push('window.tronLink')
+  if (window.tronWeb) parts.push('window.tronWeb')
+  if (window.imToken) parts.push('window.imToken')
+  return parts.length ? parts.join(', ') : 'none found (open this page in the wallet\'s DApp browser)'
+}
+
+async function waitForTronWeb(ms = 6000) {
+  const t0 = Date.now()
+  while (Date.now() - t0 < ms) {
+    if (window.tronWeb) return window.tronWeb
+    await new Promise(r => setTimeout(r, 200))
+  }
+  return null
+}
+
+$('provider').textContent = describeProvider()
+
+$('connect').onclick = async () => {
+  try {
+    if (window.tronLink?.request) {
+      try { await window.tronLink.request({ method: 'tron_requestAccounts' }) } catch (e) { /* some wallets connect on their own */ }
+    }
+    wallet = await waitForTronWeb()
+    $('provider').textContent = describeProvider()
+    if (!wallet) { $('addr').textContent = 'no tronWeb injected'; return }
+    const addr = wallet.defaultAddress?.base58
+    $('addr').textContent = addr || 'not connected yet: tap Connect again after approving'
+    $('sign').disabled = !addr
+  } catch (e) {
+    $('addr').textContent = 'error: ' + (e?.message || e)
+  }
+}
+
+$('sign').onclick = async () => {
+  const msg = $('msg').value
+  const addr = wallet.defaultAddress.base58
+  $('out').hidden = false
+  $('verdict').className = 'verdict'
+  $('verdict').textContent = 'Waiting for the wallet…'
+  let sig
+  try {
+    if (typeof wallet.trx?.signMessageV2 !== 'function') throw new Error('this wallet\'s tronWeb has no trx.signMessageV2')
+    sig = await wallet.trx.signMessageV2(msg)
+  } catch (e) {
+    $('verdict').className = 'verdict warn'
+    $('verdict').textContent = 'Signing failed or was rejected: ' + (e?.message || e)
+    return
+  }
+  if (typeof sig === 'string' && !sig.startsWith('0x')) sig = '0x' + sig
+  $('sig').textContent = sig
+
+  const m = enc(msg)
+  let recLen = '–', recNoLen = '–', recWallet = '–'
+  try { recLen = recover(sig, keccak_256(cat(enc(PREFIX), enc(String(m.length)), m))) } catch (e) { recLen = 'error: ' + e.message }
+  try { recNoLen = recover(sig, keccak_256(cat(enc(PREFIX), m))) } catch (e) { recNoLen = 'error: ' + e.message }
+  try { recWallet = typeof wallet.trx?.verifyMessageV2 === 'function' ? await wallet.trx.verifyMessageV2(msg, sig) : 'not available' } catch (e) { recWallet = 'error: ' + (e?.message || e) }
+  $('recLen').textContent = recLen
+  $('recNoLen').textContent = recNoLen
+  $('recWallet').textContent = String(recWallet)
+
+  let verdict, cls
+  if (recLen === addr) { verdict = 'OK: the signature is TronWeb-compatible (V2 with length). The app handles V2 correctly.'; cls = 'ok' }
+  else if (recNoLen === addr) { verdict = 'BUG CONFIRMED IN APP: the wallet signed V2 without the message length. TronWeb verifyMessageV2 recovers the wrong address.'; cls = 'bad' }
+  else { verdict = 'MISMATCH: neither format recovers your address. Copy the result below so it can be analysed.'; cls = 'warn' }
+  $('verdict').className = 'verdict ' + cls
+  $('verdict').textContent = verdict
+
+  $('report').textContent = [
+    'Tron signMessageV2 check',
+    `date: ${new Date().toISOString()}`,
+    `user agent: ${navigator.userAgent}`,
+    `provider: ${describeProvider()}`,
+    `wallet address: ${addr}`,
+    `message: ${JSON.stringify(msg)} (${m.length} bytes UTF-8)`,
+    `signature: ${sig}`,
+    `recovered (TronWeb V2, with length): ${recLen}`,
+    `recovered (no length): ${recNoLen}`,
+    `wallet verifyMessageV2: ${recWallet}`,
+    `verdict: ${verdict}`
+  ].join('\n')
+}
+
+$('copy').onclick = async () => {
+  try { await navigator.clipboard.writeText($('report').textContent); $('copy').textContent = 'Copied' }
+  catch { $('copy').textContent = 'Copy failed: select the text below' }
+}
+</script>
+</body>
+</html>
